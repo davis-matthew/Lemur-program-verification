@@ -1,10 +1,12 @@
+from threading import Thread
 from typing import List, Set, Dict
 
-import openai
+from ollama import Client, Options
+from os import environ
+
 from program import Program, AssertionPointAttributes
 from predicate import Predicate
 from time import perf_counter
-import json
 from utils import *
 import re
 from os.path import join, isfile
@@ -12,19 +14,56 @@ from copy import copy
 
 replacements = {"UCHAR_MAX": "0xff", "UINT_MAX": "0xffffffff"}
 
+PORTS = [int(x) for x in environ['LLM_PORTS'].split(",")]
+MODEL_NAME = "qwen2.5-coder:32b-instruct-q4_K_M"
+TEMPERATURE = 0.8
+N_CTX = 2047
+CLIENTS = [Client(host="http://127.0.0.1:" + str(p), timeout=150) for p in PORTS]
+
+def runQuery(messages, n_choices, max_tokens, penalty):
+    converted_messages = []
+    for message in messages:
+        converted_messages.append({"role": message['role'], "content": message['content']})
+    results = [None] * n_choices
+    start = perf_counter()
+    def _run(client, i):
+        try:
+            results[i] = client.chat(
+                    model=MODEL_NAME,
+                    options=Options(temperature=TEMPERATURE, num_ctx=N_CTX, presence_penalty=penalty, frequency_penalty=penalty, num_predict=max_tokens),
+                    messages=converted_messages,
+                    keep_alive="-1m",
+                )["message"]["content"]
+        except:
+            pass
+    if len(CLIENTS) == 1:
+        for i in range(n_choices):
+            _run(CLIENTS[0], i)
+    elif n_choices <= len(CLIENTS):
+        ts = []
+        for i in range(n_choices):
+            t = Thread(target=_run, args=(CLIENTS[i], i))
+            t.start()
+            ts.append(t)
+        for t in ts:
+            t.join()
+    else:
+        raise NotImplementedError()
+    results = [(r if r is not None else "") for r in results]
+    elapsed = perf_counter() - start
+    result = {}
+    result["elapsed"] = elapsed
+    result["messages"] = messages
+    result["choices"] = []
+    for i, r in enumerate(results):
+        value = {'message': {'role': 'assistant', 'content': r}, 'index': i}
+        result["choices"].append(value)
+    return result
+
 class Prompter:
     def __init__(self, program: Program, model: str):
-        openai.api_key = os.getenv("OPENAI_API_KEY")
-
         self.program = program
         self.prompt_id = 0
-
-        self.model = model
-
-        self.cache = None
-        models = openai.Model.list()
-        #print(models)
-
         self.line_number_to_predicate: Dict[int, Dict[str, int]] = {}
         self.line_number_to_assertion_to_predicate: Dict[int, Dict[str, Predicate]] = {}
 
@@ -33,26 +72,8 @@ class Prompter:
         return {"role": "system" if system else "user", "content": content}
 
     # , model="gpt-3.5-turbo"
-    def prompt(self, messages, model: str, max_tokens=100, attempts = 1, penalty = 1.5):
-        start = perf_counter()
-        self.prompt_id += 1
-        try:
-            result = openai.ChatCompletion.create(
-                model=model,
-                messages=messages,
-                temperature=0.8,
-                max_tokens=max_tokens,
-                n = attempts,
-                presence_penalty = penalty,
-                frequency_penalty = penalty,
-            )
-        except Exception as e:
-            print("Error: ", e)
-            result = {}
-        elapsed = perf_counter() - start
-        result["elapsed"] = elapsed
-        result["messages"] = messages
-        return result
+    def prompt(self, messages, max_tokens=100, attempts = 1, penalty = 1.5):
+        return runQuery(messages, attempts, max_tokens, penalty)
 
     def suggest_predicate(self, goal: Predicate, num_assertions: int, attempts: int,
                           simulate=True)-> List[List[Predicate]]:
@@ -77,7 +98,7 @@ class Prompter:
             raw_result = ""
             results = []
             for penalty in [1.5, 2]:
-                for d in self.prompt(messages, attempts=attempts, penalty=penalty, model=self.model)["choices"]:
+                for d in self.prompt(messages, attempts=attempts, penalty=penalty)["choices"]:
                     raw_result += f"GPT output {d['index'] + 1} with penality {penalty}:\n{d['message']['content']}\n"
                     tmp_results = []
                     for line in d['message']['content'].split("\n"):
@@ -164,7 +185,7 @@ class Prompter:
             raw_result = ""
             results = []
             for penalty in [1.5 , 2]:
-                for d in self.prompt(messages, attempts=attempts, penalty=penalty, model=self.model)["choices"]:
+                for d in self.prompt(messages, attempts=attempts, penalty=penalty)["choices"]:
                     raw_result += f"GPT output {d['index'] + 1} with penality {penalty}:\n{d['message']['content']}\n"
                     tmp_results = []
                     for line in d['message']['content'].split("\n"):
@@ -316,7 +337,7 @@ class Prompter:
             self.dump_messages(messages)
             raw_result = ""
             results = []
-            for d in self.prompt(messages, attempts=1, model=self.model)["choices"]:
+            for d in self.prompt(messages, attempts=1)["choices"]:
                 raw_result += f"GPT output {d['index'] + 1}:\n{d['message']['content']}\n"
                 tmp_results = []
                 for line in d['message']['content'].split("\n"):

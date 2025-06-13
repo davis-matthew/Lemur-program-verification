@@ -86,11 +86,11 @@ def create_working_dir(working_dir: str, c_filename: str, property: str):
     #new_dir = join(working_dir, f"{basename(c_filename)[:-2]}+{property}+{date_time}")
     new_dir = join(working_dir, f"{basename(c_filename)[:-2]}")
     try:
-        os.makedirs(new_dir)
+        os.makedirs(new_dir, exist_ok=True)
         new_dir = abspath(new_dir)
         print(f"Working directory created: {new_dir}")
         code_dir = join(new_dir, "code/")
-        os.mkdir(code_dir)
+        os.makedirs(code_dir, exist_ok=True)
         return new_dir, code_dir
     except:
         print(f"Unable to create working directory: {new_dir}")
